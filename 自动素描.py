@@ -19,6 +19,7 @@ class AutoSketchApp:
         self.root.attributes("-topmost", True)
 
         self.is_running = False
+        self.is_paused = False       # ★ 新增：暂停状态标志
         self.stop_requested = False
         self.image_path = None
         self.contours = []
@@ -27,6 +28,7 @@ class AutoSketchApp:
         self.setup_ui()
 
         keyboard.add_hotkey('F9', self.on_hotkey_start)
+        keyboard.add_hotkey('F8', self.on_hotkey_pause)  # ★ 新增：F8暂停快捷键
         keyboard.add_hotkey('F10', self.on_hotkey_stop)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
@@ -51,7 +53,7 @@ class AutoSketchApp:
         ttk.Label(detail_frame, text="线条细节(阈值):").pack(side="left")
         self.threshold_var = tk.IntVar(value=100)
 
-        # ★ 新增：直接输入数值的微调框（支持跳跃式修改）
+        # ★ 直接输入数值的微调框（支持跳跃式修改）
         thresh_spin = ttk.Spinbox(detail_frame, from_=10, to=200, textvariable=self.threshold_var, width=5,
                                   command=self.update_preview)
         thresh_spin.pack(side="right", padx=(0, 5))
@@ -102,7 +104,7 @@ class AutoSketchApp:
             row=0, column=3)
 
         # --- 状态与控制 ---
-        ttk.Label(self.root, text="F9: 开始作画 | F10: 紧急停止", foreground="red",
+        ttk.Label(self.root, text="F9: 开始 | F8: 暂停/继续 | F10: 停止", foreground="red",
                   font=("Microsoft YaHei", 10, "bold")).pack(pady=5)
         self.status_label = ttk.Label(self.root, text="当前状态: 请先上传图片", font=("Microsoft YaHei", 11, "bold"),
                                       foreground="blue")
@@ -187,15 +189,22 @@ class AutoSketchApp:
         if not self.is_running and self.contours:
             self.start_drawing()
 
+    # ★ 新增：处理暂停指令
+    def on_hotkey_pause(self):
+        if self.is_running and not self.stop_requested:
+            self.is_paused = not self.is_paused
+
     def on_hotkey_stop(self):
         if self.is_running:
             self.stop_requested = True
+            self.is_paused = False  # 解除暂停阻塞，让线程安全退出
             self.status_label.config(text="正在强制停止...", foreground="orange")
 
     def start_drawing(self):
         self.is_running = True
+        self.is_paused = False
         self.stop_requested = False
-        self.status_label.config(text="正在作画中! (按F10停止)", foreground="red")
+        self.status_label.config(text="正在作画中! (F8暂停 | F10停止)", foreground="red")
         threading.Thread(target=self.draw_task, daemon=True).start()
 
     def draw_task(self):
@@ -223,6 +232,29 @@ class AutoSketchApp:
         delay = max(0.00, self.delay_var.get())
         mouse_btn = self.btn_var.get()
 
+        # ★ 新增核心逻辑：检查是否触发了暂停
+        def check_pause(target_x, target_y, should_be_down):
+            if self.is_paused:
+                # 暂停时：抬起鼠标释放控制权
+                pyautogui.mouseUp(button=mouse_btn)
+                self.root.after(0, lambda: self.status_label.config(text="当前状态: 已暂停 (按F8继续)", foreground="purple"))
+                
+                # 阻塞循环直到取消暂停或按下停止
+                while self.is_paused and not self.stop_requested:
+                    time.sleep(0.1)
+                    
+                if self.stop_requested:
+                    return False
+                
+                # 继续时：恢复UI，鼠标移回刚才的点，重新按下按键
+                self.root.after(0, lambda: self.status_label.config(text="正在作画中! (F8暂停 | F10停止)", foreground="red"))
+                pyautogui.moveTo(target_x, target_y)
+                time.sleep(delay)
+                if should_be_down:
+                    pyautogui.mouseDown(button=mouse_btn)
+                    time.sleep(delay)
+            return True
+
         try:
             pyautogui.mouseUp(button=mouse_btn)
             time.sleep(delay)
@@ -240,6 +272,9 @@ class AutoSketchApp:
                     screen_y = int(offset_y + img_y * scale)
 
                     if first_point:
+                        # 检查暂停状态 (移动到下一笔前)
+                        if not check_pause(screen_x, screen_y, False): break
+
                         pyautogui.mouseUp(button=mouse_btn)
                         pyautogui.moveTo(screen_x, screen_y)
                         time.sleep(delay)
@@ -257,6 +292,10 @@ class AutoSketchApp:
                             if self.stop_requested: break
                             nx = prev_x + (screen_x - prev_x) * (i / steps)
                             ny = prev_y + (screen_y - prev_y) * (i / steps)
+                            
+                            # 检查暂停状态 (拖拽中途)
+                            if not check_pause(int(nx), int(ny), True): break
+
                             pyautogui.moveTo(int(nx), int(ny))
 
                             # 仅在需要时进行微小休眠，保证游戏引擎捕捉拖拽轨迹
@@ -274,6 +313,7 @@ class AutoSketchApp:
 
     def reset_ui(self):
         self.is_running = False
+        self.is_paused = False
         self.status_label.config(text="当前状态: 待机中...", foreground="blue")
 
     def on_closing(self):
