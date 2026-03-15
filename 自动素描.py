@@ -63,9 +63,9 @@ class AutoSketchApp:
         thresh_scale.grid(row=0, column=1, sticky="ew", padx=5)
         thresh_scale.bind("<ButtonRelease-1>", self.update_preview)
 
-        # ★ 2. 过滤短线 (解决微小飞线和局部模糊的终极武器)
+        # 2. 过滤短线防噪点
         ttk.Label(detail_frame, text="过滤短线(防噪点):").grid(row=1, column=0, sticky="w", pady=2)
-        self.min_len_var = tk.IntVar(value=10) # 默认过滤长度小于10的灰尘
+        self.min_len_var = tk.IntVar(value=10) 
         minlen_spin = ttk.Spinbox(detail_frame, from_=0, to=100, textvariable=self.min_len_var, width=5, command=self.update_preview)
         minlen_spin.grid(row=1, column=2, padx=(0, 5))
         minlen_spin.bind('<Return>', self.update_preview)
@@ -104,7 +104,7 @@ class AutoSketchApp:
         ttk.Spinbox(draw_frame, from_=1, to=50, textvariable=self.drag_step_var, width=8).grid(row=0, column=1)
 
         ttk.Label(draw_frame, text="起落笔延迟 (秒):").grid(row=1, column=0, padx=10, pady=5, sticky="e")
-        self.delay_var = tk.DoubleVar(value=0.01) # 默认设为0.01
+        self.delay_var = tk.DoubleVar(value=0.02) # ★ 默认值提升为 0.02 秒，极致防飞线
         ttk.Spinbox(draw_frame, from_=0.00, to=0.2, increment=0.01, textvariable=self.delay_var, width=8).grid(row=1, column=1)
 
         ttk.Label(draw_frame, text="使用按键:").grid(row=0, column=2, padx=10, pady=5, sticky="e")
@@ -148,13 +148,14 @@ class AutoSketchApp:
         min_len = self.min_len_var.get()
         
         for c in contours:
-            # ★ 修复1：丢弃肉眼看不见的噪点碎屑，防止疯狂原地跳跃导致飞线
             if cv2.arcLength(c, True) < min_len:
                 continue
                 
-            # ★ 修复2：彻底抛弃动态比例压缩！强制以 1.0 像素的最高精度还原曲线。
-            # 这解决了嘴部被画成僵硬多边形、甚至多出一个圈的“低模Bug”。
-            approx = cv2.approxPolyDP(c, 1.0, False)
+            # ★ 究极修复：回滚至极高精度的动态压缩算法！
+            # 0.001 保证了即使是最小的嘴部和发丝弯曲，也能极其平滑地复刻。
+            # 彻底解决“低模直线画风”和“嘴部变成空心多边形”的怪异Bug。
+            epsilon = 0.001 * cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, epsilon, False)
             if len(approx) > 1:
                 raw_contours.append(approx)
 
@@ -242,10 +243,8 @@ class AutoSketchApp:
 
         step_px = max(1, self.drag_step_var.get())
         
-        # ★ 强制底层保底延迟机制：
-        # 无论界面设置多低，底层都会保障至少 0.015 秒（约1帧）的延迟。
-        # 这是为了 100% 确保游戏引擎能抓取到鼠标已经抬起，防止物理粘连飞线。
-        delay = max(0.015, self.delay_var.get())
+        # ★ 安全底线提升至 0.02秒 (大于60帧的16ms)，杜绝任何引擎漏读事件
+        delay = max(0.02, self.delay_var.get())
         mouse_btn = self.btn_var.get()
 
         self.global_offset_x = 0
@@ -260,10 +259,8 @@ class AutoSketchApp:
 
             pyautogui.mouseUp(button=mouse_btn)
 
-            # --- 1. 暂停前：截取中心区域锚点 ---
             if self.auto_align_var.get():
                 self.root.after(0, lambda: self.status_label.config(text="正在保存地图锚点快照...", foreground="purple"))
-                # ★ 修复3：扩大快照取样面积至 50%，增加特征点，防止认错坐标。
                 aw, ah = int(box_w * 0.50), int(box_h * 0.50)
                 ax, ay = int(box_x + (box_w - aw) / 2), int(box_y + (box_h - ah) / 2)
                 anchor_img = pyautogui.screenshot(region=(ax, ay, aw, ah))
@@ -273,14 +270,12 @@ class AutoSketchApp:
 
             self.root.after(0, lambda: self.status_label.config(text="当前状态: 已暂停 (按F8继续)", foreground="purple"))
             
-            # --- 2. 阻塞等待 ---
             while self.is_paused and not self.stop_requested:
                 time.sleep(0.1)
                 
             if self.stop_requested:
                 return False, 0, 0
 
-            # --- 3. 恢复时：物理精准拖拽纠偏 ---
             if self.auto_align_var.get():
                 self.root.after(0, lambda: self.status_label.config(text="正在大范围扫描寻找对齐点...", foreground="orange"))
                 found = False
@@ -299,8 +294,6 @@ class AutoSketchApp:
                     res = cv2.matchTemplate(screen_cv, anchor_cv, cv2.TM_CCOEFF_NORMED)
                     min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
                     
-                    # ★ 修复4：将匹配阈值从 0.65 史诗级拉高到 0.80！
-                    # 宁愿找不到，也绝对不能找错位置画重影。
                     if max_val > 0.80: 
                         found = True
                         break
@@ -345,7 +338,8 @@ class AutoSketchApp:
             new_target_x = target_x + delta_x
             new_target_y = target_y + delta_y
             
-            pyautogui.moveTo(new_target_x, new_target_y)
+            # ★ 同样为暂停恢复阶段增加物理寻路缓冲，彻底消灭闪回引起的飞线
+            pyautogui.moveTo(new_target_x, new_target_y, duration=0.01)
             time.sleep(delay)
             if should_be_down:
                 pyautogui.mouseDown(button=mouse_btn)
@@ -376,12 +370,15 @@ class AutoSketchApp:
                             screen_x += d_x
                             screen_y += d_y
 
+                        # ★ 根绝飞线的究极处理：严格解绑所有抬起与移动的动作
                         pyautogui.mouseUp(button=mouse_btn)
-                        pyautogui.moveTo(screen_x, screen_y)
-                        time.sleep(delay)
+                        time.sleep(delay) # 强制等待游戏确认已抬笔
+                        
+                        pyautogui.moveTo(screen_x, screen_y, duration=0.01) # 强制模拟物理移动，拒绝0帧瞬移
+                        time.sleep(delay) # 强制等待物理惯性停止，准星对准
 
                         pyautogui.mouseDown(button=mouse_btn)
-                        time.sleep(delay)
+                        time.sleep(delay) # 强制等待游戏确认已落笔
                         
                         first_point = False
                         prev_x, prev_y = screen_x, screen_y
