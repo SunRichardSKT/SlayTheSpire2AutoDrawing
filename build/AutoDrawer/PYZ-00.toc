@@ -347,6 +347,7 @@
   ('concurrent.futures.thread',
    'D:\\python3.11.4\\Lib\\concurrent\\futures\\thread.py',
    'PYMODULE'),
+  ('configparser', 'D:\\python3.11.4\\Lib\\configparser.py', 'PYMODULE'),
   ('contextlib', 'D:\\python3.11.4\\Lib\\contextlib.py', 'PYMODULE'),
   ('contextvars', 'D:\\python3.11.4\\Lib\\contextvars.py', 'PYMODULE'),
   ('copy', 'D:\\python3.11.4\\Lib\\copy.py', 'PYMODULE'),

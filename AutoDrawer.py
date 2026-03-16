@@ -7,6 +7,8 @@ import time
 import cv2
 import numpy as np
 import math
+import os            # ★ 新增导入 os 库，用于检测文件
+import configparser  # ★ 新增导入 configparser，用于解析 txt 配置文件
 from PIL import Image, ImageTk
 
 
@@ -14,8 +16,9 @@ class AutoSketchApp:
     def __init__(self, root):
         self.root = root
         self.root.title("杀戮尖塔2 自动素描机器人")
-        self.root.geometry("500x780") 
-        self.root.resizable(False, False)
+        # ★ 优化：调整初始尺寸，设定最小尺寸，并允许自由缩放
+        self.root.geometry("520x700") 
+        self.root.minsize(450, 400) # 设定最小宽度和高度，防止UI崩溃
         self.root.attributes("-topmost", True)
 
         self.is_running = False
@@ -24,8 +27,10 @@ class AutoSketchApp:
         self.image_path = None
         self.contours = []
         self.image_size = (0, 0)
+        self.config_file = "config.txt"  # ★ 新增：指定外部配置文件的名称
 
         self.setup_ui()
+        self.load_config()               # ★ 新增：在UI构建完毕后，立刻加载外部配置覆盖默认值
 
         keyboard.add_hotkey('F9', self.on_hotkey_start)
         keyboard.add_hotkey('F8', self.on_hotkey_pause)  
@@ -37,26 +42,58 @@ class AutoSketchApp:
         style.configure("TLabel", font=("Microsoft YaHei", 9))
         style.configure("TButton", font=("Microsoft YaHei", 10))
 
+        # ★ 核心升级：创建全局响应式滚动视图 (Scrollable Frame)
+        self.main_frame = ttk.Frame(self.root)
+        self.main_frame.pack(fill="both", expand=True)
+
+        self.main_canvas = tk.Canvas(self.main_frame, highlightthickness=0)
+        self.main_canvas.pack(side="left", fill="both", expand=True)
+
+        self.scrollbar = ttk.Scrollbar(self.main_frame, orient="vertical", command=self.main_canvas.yview)
+        self.scrollbar.pack(side="right", fill="y")
+
+        self.main_canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        # 真正承载所有 UI 元素的容器
+        self.content_frame = ttk.Frame(self.main_canvas)
+        self.canvas_window = self.main_canvas.create_window((0, 0), window=self.content_frame, anchor="nw")
+
+        # 绑定事件：当内容发生变化时，更新滚动条范围
+        self.content_frame.bind(
+            "<Configure>",
+            lambda e: self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
+        )
+        # 绑定事件：当窗口宽度发生变化时，让内容框跟随自适应变宽
+        self.main_canvas.bind(
+            "<Configure>",
+            lambda e: self.main_canvas.itemconfig(self.canvas_window, width=e.width)
+        )
+        
+        # 绑定鼠标滚轮事件支持上下滚动
+        self.root.bind_all("<MouseWheel>", lambda e: self.main_canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+
+        # -----------------------------------------------------------
+        # ★ 将原有的 self.root 替换为 self.content_frame，挂载到滚动视图中
+        # -----------------------------------------------------------
+
         # --- 第一部分：图片加载与预览 ---
-        img_frame = ttk.LabelFrame(self.root, text=" 图片设置 ")
+        img_frame = ttk.LabelFrame(self.content_frame, text=" 图片设置 ")
         img_frame.pack(fill="x", padx=15, pady=5)
 
         ttk.Button(img_frame, text="📁 选择并上传图片", command=self.load_image).pack(pady=5)
 
-        self.canvas = tk.Canvas(img_frame, width=300, height=200, bg="black")
-        self.canvas.pack(pady=5)
+        self.preview_canvas = tk.Canvas(img_frame, width=300, height=200, bg="black")
+        self.preview_canvas.pack(pady=5)
         self.preview_label = ttk.Label(img_frame, text="等待上传图片...", foreground="gray")
         self.preview_label.pack()
 
-        # 使用 grid 布局使其更整齐
         detail_frame = ttk.Frame(img_frame)
         detail_frame.pack(fill="x", padx=10, pady=5)
         
         # 1. 线条细节阈值
         ttk.Label(detail_frame, text="线条细节(阈值):").grid(row=0, column=0, sticky="w", pady=2)
         self.threshold_var = tk.IntVar(value=100)
-        thresh_spin = ttk.Spinbox(detail_frame, from_=10, to=200, textvariable=self.threshold_var, width=5,
-                                  command=self.update_preview)
+        thresh_spin = ttk.Spinbox(detail_frame, from_=10, to=200, textvariable=self.threshold_var, width=5, command=self.update_preview)
         thresh_spin.grid(row=0, column=2, padx=(0, 5))
         thresh_spin.bind('<Return>', self.update_preview)
         thresh_scale = ttk.Scale(detail_frame, from_=10, to=200, variable=self.threshold_var, orient="horizontal")
@@ -76,7 +113,7 @@ class AutoSketchApp:
         detail_frame.columnconfigure(1, weight=1)
 
         # --- 第二部分：绘图区域设置 (红框参数) ---
-        area_frame = ttk.LabelFrame(self.root, text=" 绘制区域 (红框范围 %) ")
+        area_frame = ttk.LabelFrame(self.content_frame, text=" 绘制区域 (红框范围 %) ")
         area_frame.pack(fill="x", padx=15, pady=5)
 
         ttk.Label(area_frame, text="左侧避开%:").grid(row=0, column=0, padx=5, pady=5)
@@ -96,7 +133,7 @@ class AutoSketchApp:
         ttk.Spinbox(area_frame, from_=0, to=50, textvariable=self.bottom_margin, width=5).grid(row=1, column=3)
 
         # --- 第三部分：绘制参数 ---
-        draw_frame = ttk.LabelFrame(self.root, text=" 绘制参数 (防乱线设置) ")
+        draw_frame = ttk.LabelFrame(self.content_frame, text=" 绘制参数 (防乱线设置) ")
         draw_frame.pack(fill="x", padx=15, pady=5)
 
         ttk.Label(draw_frame, text="拖拽步长(像素):").grid(row=0, column=0, padx=10, pady=5, sticky="e")
@@ -104,7 +141,7 @@ class AutoSketchApp:
         ttk.Spinbox(draw_frame, from_=1, to=50, textvariable=self.drag_step_var, width=8).grid(row=0, column=1)
 
         ttk.Label(draw_frame, text="起落笔延迟 (秒):").grid(row=1, column=0, padx=10, pady=5, sticky="e")
-        self.delay_var = tk.DoubleVar(value=0.02) # ★ 默认值提升为 0.02 秒，极致防飞线
+        self.delay_var = tk.DoubleVar(value=0.02)
         ttk.Spinbox(draw_frame, from_=0.00, to=0.2, increment=0.01, textvariable=self.delay_var, width=8).grid(row=1, column=1)
 
         ttk.Label(draw_frame, text="使用按键:").grid(row=0, column=2, padx=10, pady=5, sticky="e")
@@ -115,11 +152,82 @@ class AutoSketchApp:
         ttk.Checkbutton(draw_frame, text="暂停恢复时自动寻找并物理对齐地图", variable=self.auto_align_var).grid(row=2, column=0, columnspan=2, padx=10, pady=5, sticky="w")
 
         # --- 状态与控制 ---
-        ttk.Label(self.root, text="F9: 开始 | F8: 暂停/继续 | F10: 停止", foreground="red",
-                  font=("Microsoft YaHei", 10, "bold")).pack(pady=5)
-        self.status_label = ttk.Label(self.root, text="当前状态: 请先上传图片", font=("Microsoft YaHei", 11, "bold"),
+        ttk.Label(self.content_frame, text="F9: 开始 | F8: 暂停/继续 | F10: 停止", foreground="red",
+                  font=("Microsoft YaHei", 10, "bold")).pack(pady=10)
+        self.status_label = ttk.Label(self.content_frame, text="当前状态: 请先上传图片", font=("Microsoft YaHei", 11, "bold"),
                                       foreground="blue")
         self.status_label.pack(pady=5)
+
+    # ★ 新增核心功能：配置加载与解析
+    def load_config(self):
+        """加载或创建配置文件"""
+        # 如果文件不存在，则自动生成带有详细中文注释的默认配置文件
+        if not os.path.exists(self.config_file):
+            self.create_default_config()
+
+        config = configparser.ConfigParser()
+        try:
+            # 必须指定 utf-8 编码，防止中文注释乱码报错
+            config.read(self.config_file, encoding='utf-8')
+            
+            # 读取并设置各个参数，如果文本里被误删找不到键值，则 fallback 回退到UI的默认值
+            self.threshold_var.set(config.getint('线条设置', 'threshold', fallback=self.threshold_var.get()))
+            self.min_len_var.set(config.getint('线条设置', 'min_len', fallback=self.min_len_var.get()))
+            
+            self.left_margin.set(config.getint('绘制区域', 'left_margin', fallback=self.left_margin.get()))
+            self.right_margin.set(config.getint('绘制区域', 'right_margin', fallback=self.right_margin.get()))
+            self.top_margin.set(config.getint('绘制区域', 'top_margin', fallback=self.top_margin.get()))
+            self.bottom_margin.set(config.getint('绘制区域', 'bottom_margin', fallback=self.bottom_margin.get()))
+            
+            self.drag_step_var.set(config.getint('绘制参数', 'drag_step', fallback=self.drag_step_var.get()))
+            self.delay_var.set(config.getfloat('绘制参数', 'delay', fallback=self.delay_var.get()))
+            self.btn_var.set(config.get('绘制参数', 'mouse_btn', fallback=self.btn_var.get()))
+            self.auto_align_var.set(config.getboolean('绘制参数', 'auto_align', fallback=self.auto_align_var.get()))
+            
+        except Exception as e:
+            print(f"配置文件读取有误，将使用默认参数: {e}")
+
+    # ★ 新增核心功能：自动生成规范 txt 文件
+    def create_default_config(self):
+        """生成带有中文注释的默认 txt 配置文件"""
+        default_content = """# ==========================================
+# 杀戮尖塔2自动素描机器人 - 本地配置文件
+# 格式说明：可以直接修改等号后面的数值。
+# 修改完成后，重新打开软件即可生效！
+# ==========================================
+
+[线条设置]
+# 线条细节(阈值)，建议范围 10~200。默认: 100
+threshold = 100
+
+# 过滤短线(防噪点)，去掉肉眼看不见的微小碎屑。默认: 10
+min_len = 10
+
+[绘制区域]
+# 游戏红框避开的百分比 (0-50)
+left_margin = 16
+right_margin = 19
+top_margin = 9
+bottom_margin = 7
+
+[绘制参数]
+# 拖拽步长(像素)，控制线条平滑度。默认: 5
+drag_step = 5
+
+# 起落笔延迟(秒)，防止物理粘连飞线。极速推荐: 0.015~0.02
+delay = 0.02
+
+# 使用按键 (left 或 right)。默认: right
+mouse_btn = right
+
+# 暂停恢复时，是否自动寻找并物理对齐地图 (True 或 False)。默认: True
+auto_align = True
+"""
+        try:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                f.write(default_content)
+        except Exception as e:
+            print(f"创建配置文件失败: {e}")
 
     def load_image(self):
         file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp")])
@@ -151,9 +259,6 @@ class AutoSketchApp:
             if cv2.arcLength(c, True) < min_len:
                 continue
                 
-            # ★ 究极修复：回滚至极高精度的动态压缩算法！
-            # 0.001 保证了即使是最小的嘴部和发丝弯曲，也能极其平滑地复刻。
-            # 彻底解决“低模直线画风”和“嘴部变成空心多边形”的怪异Bug。
             epsilon = 0.001 * cv2.arcLength(c, True)
             approx = cv2.approxPolyDP(c, epsilon, False)
             if len(approx) > 1:
@@ -196,8 +301,8 @@ class AutoSketchApp:
         preview_img.thumbnail((300, 200), Image.Resampling.LANCZOS)
         self.tk_img = ImageTk.PhotoImage(preview_img)
 
-        self.canvas.delete("all")
-        self.canvas.create_image(150, 100, anchor="center", image=self.tk_img)
+        self.preview_canvas.delete("all")
+        self.preview_canvas.create_image(150, 100, anchor="center", image=self.tk_img)
         self.preview_label.config(text=f"解析完成：高质量提取 {len(self.contours)} 条路径段")
 
     def on_hotkey_start(self):
@@ -242,9 +347,7 @@ class AutoSketchApp:
         offset_y = box_y + (box_h - draw_h) / 2
 
         step_px = max(1, self.drag_step_var.get())
-        
-        # ★ 安全底线提升至 0.02秒 (大于60帧的16ms)，杜绝任何引擎漏读事件
-        delay = max(0.02, self.delay_var.get())
+        delay = max(0.015, self.delay_var.get())
         mouse_btn = self.btn_var.get()
 
         self.global_offset_x = 0
@@ -338,7 +441,6 @@ class AutoSketchApp:
             new_target_x = target_x + delta_x
             new_target_y = target_y + delta_y
             
-            # ★ 同样为暂停恢复阶段增加物理寻路缓冲，彻底消灭闪回引起的飞线
             pyautogui.moveTo(new_target_x, new_target_y, duration=0.01)
             time.sleep(delay)
             if should_be_down:
@@ -370,15 +472,14 @@ class AutoSketchApp:
                             screen_x += d_x
                             screen_y += d_y
 
-                        # ★ 根绝飞线的究极处理：严格解绑所有抬起与移动的动作
                         pyautogui.mouseUp(button=mouse_btn)
-                        time.sleep(delay) # 强制等待游戏确认已抬笔
+                        time.sleep(delay) 
                         
-                        pyautogui.moveTo(screen_x, screen_y, duration=0.01) # 强制模拟物理移动，拒绝0帧瞬移
-                        time.sleep(delay) # 强制等待物理惯性停止，准星对准
+                        pyautogui.moveTo(screen_x, screen_y, duration=0.01) 
+                        time.sleep(delay) 
 
                         pyautogui.mouseDown(button=mouse_btn)
-                        time.sleep(delay) # 强制等待游戏确认已落笔
+                        time.sleep(delay) 
                         
                         first_point = False
                         prev_x, prev_y = screen_x, screen_y
